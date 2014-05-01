@@ -1,99 +1,62 @@
 (ns carapace.stream
-  "Stream processing for Process input and output streams."
+  "Stream processing for Process input and output streams.
+  Provides an abstraction to pump stream data as defined by a stream-map."
   (:require
    [clojure.core.async :refer [<! alts! chan go-loop put! timeout]]
    [com.palletops.api-builder.api :refer [defn-api]]
    [schema.core :as schema :refer [either optional-key validate]]))
 
-(def StreamOptions
-  {(optional-key :period) schema/Int
-   (optional-key :buffer-size) schema/Int})
+(def StreamerOptions
+  {(optional-key :period) schema/Int})
 
 (def Streamer
   {:streams clojure.lang.Atom
    :channel (schema/protocol clojure.core.async.impl.protocols/ReadPort)
-   :buffer-size schema/Int
    :period schema/Int})
 
 (def StreamMap
   {:in (either java.io.InputStream java.io.Reader)
-   :out (either java.io.OutputStream java.io.Writer)
    :buffer schema/Any
    :buffer-size schema/Int
-   :flush schema/Bool})
+   :f schema/Any})
 
+;;; # Streamer
 (defn-api streamer
   "Return a streamer, that copies input streams to output streams.
   Use `start` to start the streamer.
-  Will use `:buffer-size` as the default buffer size when copying.
   Will poll every `:period` milliseconds."
-  {:sig [[StreamOptions :- Streamer]]}
-  [{:keys [buffer-size period]
-    :or {buffer-size (* 16 1024)
-         period 100}}]
+  {:sig [[StreamerOptions :- Streamer]]}
+  [{:keys [period] :or {period 100}}]
   {:streams (atom [])
    :channel (chan)
-   :period period
-   :buffer-size buffer-size})
+   :period period})
 
-(defmulti stream-map
-  "Return a stream map for the given inputs"
-  (fn [{:keys [in out buffer buffer-size]} options]
-    [(type in) (type out)]))
 
-(defmethod stream-map [java.io.InputStream java.io.OutputStream]
-  [{:keys [in out buffer buffer-size] :as m} options]
-  (let [buffer-size (or (and buffer (count buffer))
-                        buffer-size
-                        (:buffer-size options))
-        buffer (or buffer (byte-array buffer-size))]
-    (assoc m :buffer-size buffer-size :buffer buffer)))
-
-(defn- ^String encoding [opts]
-  (or (:encoding opts) "UTF-8"))
-
-(defmethod stream-map [java.io.InputStream java.io.Writer]
-  [{:keys [in out buffer buffer-size] :as m} options]
-  (let [in (java.io.InputStreamReader. in (encoding m))
-        buffer-size (or (and buffer (count buffer))
-                        buffer-size
-                        (:buffer-size options))
-        buffer (or buffer (char-array buffer-size))]
-    (assoc m :in in :buffer-size buffer-size :buffer buffer)))
-
-(defmethod stream-map [java.io.Reader java.io.OutputStream]
-  [{:keys [in out buffer buffer-size] :as m} options]
-  (let [out (java.io.OutputStreamWriter. out (encoding m))
-        buffer-size (or (and buffer (count buffer))
-                        buffer-size
-                        (:buffer-size options))
-        buffer (or buffer (char-array buffer-size))]
-    (assoc m :out out :buffer-size buffer-size :buffer buffer)))
+;;; ## Polling
 
 (defmulti poll
-  (fn [{:keys [in out buffer buffer-size flush]}]
-    [(type in) (type out)]))
+  (fn [{:keys [in]}]
+    (type in)))
 
-(defmethod poll [java.io.InputStream java.io.OutputStream]
-  [{:keys [in out buffer buffer-size flush]}]
+(defmethod poll java.io.InputStream
+  [{:keys [in f buffer buffer-size]}]
   (when (pos? (.available in))
     (let [num-read (.read in buffer 0 buffer-size)]
-      (.write out buffer 0 num-read)
-      (when flush
-        (.flush out))
+      (f buffer num-read)
       true)))
 
-(defmethod poll [java.io.Reader java.io.Writer]
-  [{:keys [in out buffer buffer-size flush]}]
+(defmethod poll java.io.Reader
+  [{:keys [in f buffer buffer-size flush]}]
   (when (.ready in)
     (let [num-read (.read in buffer 0 buffer-size)]
-      (.write out buffer 0 num-read)
-      (when flush
-        (.flush out))
+      (f buffer num-read)
       true)))
 
+
+;;; ## Controlling the streamer
+
 (defn-api start
-  "Start streaming"
+  "Start streaming."
   {:sig [[Streamer :- clojure.core.async.impl.protocols.ReadPort]]}
   [{:keys [channel period streams] :as streamer}]
   (go-loop []
@@ -117,27 +80,12 @@
   [{:keys [channel] :as streamer}]
   (put! channel :done))
 
-(def StreamOptions
-  {(optional-key :flush) schema/Bool
-   (optional-key :buffer-size) schema/Int
-   (optional-key :buffer) bytes
-   (optional-key :encoding) String})
-
 (defn-api stream
-  "Stream the input stream `in` to `out` using any specified options.
-  Return the stream-map."
-  {:sig [[Streamer
-          (either java.io.InputStream java.io.Reader)
-          (either java.io.OutputStream java.io.Writer)
-          StreamOptions
-          :- StreamMap]]}
-  [{:keys [buffer-size streams] :as streamer} in out options]
-  (let [stream-map (validate
-                    StreamMap
-                    (stream-map (merge {:flush false} options {:in in :out out})
-                                {:buffer-size buffer-size}))]
-    (swap! streams conj stream-map)
-    stream-map))
+  "Stream the stream-map. Return the stream-map."
+  {:sig [[Streamer StreamMap :- StreamMap]]}
+  [{:keys [buffer-size streams] :as streamer} stream-map]
+  (swap! streams conj stream-map)
+  stream-map)
 
 (defn-api un-stream
   "Stop streaming a stream-map."
@@ -146,3 +94,96 @@
   (poll stream-map)
   (swap! streams (fn [s] (remove #(= stream-map %) s)))
   streamer)
+
+
+;;; # Stream copying
+
+;;; Provides a stream map that will copy one stream to another
+
+(defmulti copy-stream
+  (fn copy-stream [out options buffer n]
+    (type out)))
+
+(defmethod copy-stream java.io.OutputStream
+  [out {:keys [flush]} buffer n]
+  (.write out buffer 0 n)
+  (when flush
+    (.flush out)))
+
+(defmethod copy-stream java.io.Writer
+  [out {:keys [flush]} buffer n]
+  (.write out buffer 0 n)
+  (when flush
+    (.flush out)))
+
+(defmulti stream-copy-map
+  "Return a stream map for the given inputs"
+  (fn stream-copy-map [in out {:keys [buffer buffer-size encoding flush]}]
+    [(type in) (type out)]))
+
+(defmethod stream-copy-map [java.io.InputStream java.io.OutputStream]
+  [in out {:keys [buffer buffer-size encoding flush] :as options}]
+  (let [buffer-size (or (and buffer (count buffer))
+                        buffer-size
+                        (* 16 1024))
+        buffer (or buffer (byte-array buffer-size))]
+    {:in in
+     :buffer-size buffer-size
+     :buffer buffer
+     :f #(copy-stream out (select-keys options [:flush]) %1 %2)}))
+
+
+(defmethod stream-copy-map [java.io.InputStream java.io.Writer]
+  [in out {:keys [buffer buffer-size encoding flush] :as options}]
+  (let [in (java.io.InputStreamReader. in encoding)
+        buffer-size (or (and buffer (count buffer))
+                        buffer-size
+                        (* 16 1024))
+        buffer (or buffer (char-array buffer-size))]
+    {:in in
+     :buffer-size buffer-size
+     :buffer buffer
+     :f #(copy-stream out (select-keys options [:flush]) %1 %2)}))
+
+(defmethod stream-copy-map [java.io.Reader java.io.OutputStream]
+  [in out {:keys [buffer buffer-size encoding flush] :as options}]
+  (let [out (java.io.OutputStreamWriter. out encoding)
+        buffer-size (or (and buffer (count buffer))
+                        buffer-size
+                        (* 16 1024))
+        buffer (or buffer (char-array buffer-size))]
+    {:in in
+     :buffer-size buffer-size
+     :buffer buffer
+     :f #(copy-stream out (select-keys options [:flush]) %1 %2)}))
+
+(def StreamCopyOptions
+  {(optional-key :flush) schema/Bool
+   (optional-key :buffer-size) schema/Int
+   (optional-key :buffer) bytes
+   (optional-key :encoding) String})
+
+(defn-api stream-copy
+  "Return a stream-map that will copy the input stream `in` to `out`
+  using any specified options when passed to a streamer.  The input
+  `in` may be an InputStream or a Reader. The output `out` may be an
+  OutputStream or a Writer.
+
+  The copy buffer is controlled by the `:buffer` and `:buffer-size`
+  options.  If passed, the buffer is expected to be an array of the
+  correct type for `in` and `out`.
+
+  The `:flush` option controls whether the output stream is flushed
+  after every write.
+
+  The `:encoding` option takes a string and is used to specify the
+  character encoding when wrapping or unwrapping a stream to/from a
+  Reader or Writer."
+  {:sig [[(either java.io.InputStream java.io.Reader)
+          (either java.io.OutputStream java.io.Writer)
+          StreamCopyOptions
+          :- StreamMap]]}
+  [in out {:keys [flush encoding buffer buffer-size]
+           :or {flush true encoding "UTF-8"}
+           :as options}]
+  (stream-copy-map in out (merge {:flush true :encoding "UTF-8"} options)))

@@ -12,9 +12,10 @@
         charset StandardCharsets/UTF_16]
     (stream
      s
-     (ByteArrayInputStream. (.getBytes "copyme" charset))
-     out
-     {})
+     (stream-copy
+      (ByteArrayInputStream. (.getBytes "copyme" charset))
+      out
+      {}))
     (start s)
     (stop s)
     (Thread/sleep 200)

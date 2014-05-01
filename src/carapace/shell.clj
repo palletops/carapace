@@ -25,14 +25,18 @@
                                :redirect-error-stream redirect-error-stream))
         s (or streamer @default-streamer)
         stream-maps [(if in
-                       (stream/stream s in (:in p) {})
+                       (stream/stream s (stream/stream-copy in (:in p) {}))
                        (.close (:in p)))
                      (stream/stream
-                      s (:out p) *out*
-                      (assoc (select-keys options [:buffer-size :buffer])
-                        :flush flush))
+                      s
+                      (stream/stream-copy
+                       (:out p) *out*
+                       (assoc (select-keys options [:buffer-size :buffer])
+                         :flush flush)))
                      (when-not redirect-error-stream
-                       (stream/stream s (:err p) *err* {:flush flush}))]]
+                       (stream/stream
+                        s
+                        (stream/stream-copy (:err p) *err* {:flush flush})))]]
     (let [e (proc/wait-for p)]
       (doseq [sm stream-maps
               :when sm]
