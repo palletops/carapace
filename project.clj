@@ -3,6 +3,8 @@
   :url "https://github.com/palletops/carapace"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
-  :dependencies [[com.palletops/api-builder "0.1.4"]
-                 [org.clojure/core.async "0.1.301.0-deb34a-alpha"]]
-  :provided {:dependencies [[org.clojure/clojure "1.6.0"]]})
+  :dependencies [[com.palletops/api-builder "0.1.4"
+                  :exclusions [org.clojure/clojure]]
+                 [org.clojure/core.async "0.1.301.0-deb34a-alpha"
+                  :exclusions [org.clojure/clojure]]]
+  :profiles {:provided {:dependencies [[org.clojure/clojure "1.6.0"]]}})

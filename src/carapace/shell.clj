@@ -2,7 +2,9 @@
   "Execute processes from clojure"
   (:require
    [carapace.proc :as proc]
-   [carapace.stream :as stream]))
+   [carapace.stream :as stream]
+   [com.palletops.api-builder.api :refer [defn-api]]
+   [schema.core :as schema :refer [either optional-key]]))
 
 (defonce default-streamer
   (delay
@@ -26,10 +28,23 @@
     (when-not redirect-error-stream
       (stream/stream-copy (:err p) *err* {:flush flush}))]))
 
-(defn sh
+(def ShOptions
+  {(optional-key :in) (either java.io.InputStream java.io.Reader)
+   (optional-key :streamer) stream/Streamer
+   (optional-key :buffer-size) schema/Int
+   (optional-key :buffer) bytes
+   (optional-key :redirect-error-stream) schema/Bool
+   (optional-key :clear) schema/Bool
+   (optional-key :env) {(either String clojure.lang.Named) String}
+   (optional-key :directory) String
+   (optional-key :flush) schema/Bool
+   (optional-key :stream-maps-f) schema/Any})
+
+(defn-api sh
   "Execute a process, returning the exit code.
   The process executes `command`, a sequence of strings.
   Output goes to *out*."
+  {:sig [[[String] ShOptions :- schema/Int]]}
   [command {:keys [in env clear
                    streamer buffer-size buffer
                    redirect-error-stream
@@ -40,7 +55,9 @@
   (let [s (or streamer @default-streamer)
         options (merge {:flush true :redirect-error-stream true} options)
         p (proc/proc command
-                     (select-keys options [:env :clear :redirect-error-stream]))
+                     (select-keys
+                      options
+                      [:env :clear :directory :redirect-error-stream]))
         stream-maps (stream-maps-f p options)]
     (doseq [sm stream-maps]
       (stream/stream s sm))
@@ -72,10 +89,19 @@
      :out out-b
      :err err-b}))
 
-(defn sh-map
+(def ShMapOptions
+  (dissoc ShOptions (optional-key :stream-maps-f)))
+
+(def ShMap
+  {:exit schema/Int
+   :out String
+   :err String})
+
+(defn-api sh-map
   "Execute a process, returning a map with the exit code, the stdout
   and the stderr.  The process executes `command`, a sequence of
   strings."
+  {:sig [[[String] ShMapOptions :- ShMap]]}
   [command {:keys [in env clear
                    streamer buffer-size buffer
                    redirect-error-stream
